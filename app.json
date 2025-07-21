@@ -2,6 +2,7 @@
   "expo": {
     "name": "10K-A-Day",
     "slug": "10K-A-Day",
+    "scheme": "tenkaday",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
