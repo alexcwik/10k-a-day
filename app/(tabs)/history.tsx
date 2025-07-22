@@ -1,90 +1,70 @@
 // app/(tabs)/history.tsx
-import polyline from '@mapbox/polyline';
-import { collection, getDocs, getFirestore, orderBy, query } from 'firebase/firestore';
-import React, { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, FlatList, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import MapView, { Polyline as MapPolyline, PROVIDER_GOOGLE } from 'react-native-maps';
-import { useAuth } from '../../contexts/AuthContext';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useFocusEffect } from 'expo-router';
+import React, { useCallback, useState } from 'react';
+import { FlatList, RefreshControl, SafeAreaView, StyleSheet, Text, View } from 'react-native';
 
-const HistoryPage = () => {
-    const { user, firebaseApp } = useAuth();
-    const db = useMemo(() => (firebaseApp ? getFirestore(firebaseApp) : null), [firebaseApp]);
-    const [walks, setWalks] = useState<any[]>([]);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState('');
-    const [selectedWalk, setSelectedWalk] = useState<any>(null);
-    const [decodedPath, setDecodedPath] = useState<{latitude: number, longitude: number}[]>([]);
+const HistoryScreen = () => {
+  const [activities, setActivities] = useState([]);
+  const [refreshing, setRefreshing] = useState(false);
 
-    useEffect(() => {
-        if (selectedWalk?.encodedPolyline) {
-            const points = polyline.decode(selectedWalk.encodedPolyline).map(point => ({
-                latitude: point[0],
-                longitude: point[1],
-            }));
-            setDecodedPath(points);
-        }
-    }, [selectedWalk]);
+  const loadActivities = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      const storedActivities = await AsyncStorage.getItem('activities');
+      if (storedActivities) {
+        // Sort by most recent first
+        const parsedActivities = JSON.parse(storedActivities);
+        setActivities(parsedActivities.sort((a, b) => new Date(b.date) - new Date(a.date)));
+      }
+    } catch (e) {
+      console.error("Failed to load activities.", e);
+    } finally {
+      setRefreshing(false);
+    }
+  }, []);
 
-    useEffect(() => {
-        if (!user || !db) { /* ... */ return; }
-        const fetchWalks = async () => {
-            setLoading(true);
-            try {
-                const appId = 'default-app-id';
-                const q = query(collection(db, `artifacts/${appId}/users/${user.uid}/walk_history`), orderBy("date", "desc"));
-                const querySnapshot = await getDocs(q);
-                const walksData = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                setWalks(walksData);
-                if (walksData.length > 0) {
-                    setSelectedWalk(walksData[0]);
-                }
-            } catch (err) {
-                setError("Failed to fetch walk history.");
-            } finally {
-                setLoading(false);
-            }
-        };
-        fetchWalks();
-    }, [user, db]);
+  // useFocusEffect will run the callback every time the screen comes into view
+  useFocusEffect(
+    useCallback(() => {
+      loadActivities();
+    }, [loadActivities])
+  );
 
-    const formatDate = (timestamp: any) => { /* ... */ return timestamp?.toDate()?.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) || 'N/A' };
+  const renderItem = ({ item }) => (
+    <View style={styles.itemContainer}>
+      <Text style={styles.itemDate}>{new Date(item.date).toLocaleDateString()}</Text>
+      <View style={styles.itemDetails}>
+        <Text style={styles.itemText}>Distance: {(item.distance / 1000).toFixed(2)} km</Text>
+        <Text style={styles.itemText}>Steps: {item.steps.toLocaleString()}</Text>
+      </View>
+    </View>
+  );
 
-    return (
-        <View style={styles.container}>
-            <Text style={styles.title}>Your Walk History</Text>
-            <View style={styles.mapContainer}>
-                {loading && <ActivityIndicator style={StyleSheet.absoluteFill} />}
-                {selectedWalk && decodedPath.length > 0 ? (
-                    <MapView
-                        style={styles.map}
-                        provider={PROVIDER_GOOGLE}
-                        initialRegion={{
-                            latitude: decodedPath[0].latitude,
-                            longitude: decodedPath[0].longitude,
-                            latitudeDelta: 0.05,
-                            longitudeDelta: 0.05
-                        }}
-                    >
-                        <MapPolyline coordinates={decodedPath} strokeColor="#2DD4BF" strokeWidth={5} />
-                    </MapView>
-                ) : <Text style={styles.infoText}>Select a walk to view the route</Text>}
-            </View>
-            <FlatList
-                data={walks}
-                renderItem={({ item }) => (
-                     <TouchableOpacity
-                        onPress={() => setSelectedWalk(item)}
-                        style={[styles.walkItem, selectedWalk?.id === item.id && styles.selectedWalkItem]}
-                    >
-                        <Text style={styles.walkDate}>Date: {formatDate(item.date)}</Text>
-                        <Text style={styles.walkSteps}>Steps: {item.steps}</Text>
-                    </TouchableOpacity>
-                )}
-                keyExtractor={(item) => item.id}
-            />
-        </View>
-    );
+  return (
+    <SafeAreaView style={styles.container}>
+      <FlatList
+        data={activities}
+        renderItem={renderItem}
+        keyExtractor={item => item.id}
+        contentContainerStyle={styles.list}
+        ListHeaderComponent={<Text style={styles.title}>Activity History</Text>}
+        ListEmptyComponent={<Text style={styles.emptyText}>No activities recorded yet.</Text>}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={loadActivities} tintColor="#fff" />}
+      />
+    </SafeAreaView>
+  );
 };
 
-const styles = StyleSheet.create({ /* ... styles from previous response ... */ });
-export default HistoryPage;
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#1c1c1e' },
+  title: { fontSize: 28, fontWeight: 'bold', color: '#fff', padding: 20, paddingBottom: 10 },
+  list: { paddingBottom: 20 },
+  itemContainer: { backgroundColor: '#2c2c2e', padding: 20, borderRadius: 10, marginHorizontal: 20, marginBottom: 15 },
+  itemDate: { fontSize: 18, fontWeight: 'bold', color: '#fff', marginBottom: 10 },
+  itemDetails: { flexDirection: 'row', justifyContent: 'space-between' },
+  itemText: { fontSize: 16, color: '#e5e5ea' },
+  emptyText: { color: 'gray', textAlign: 'center', marginTop: 50 },
+});
+
+export default HistoryScreen;
