@@ -1,71 +1,77 @@
 // contexts/AuthContext.tsx
-import { FirebaseApp, initializeApp } from 'firebase/app';
-import {
-    getAuth,
-    onAuthStateChanged,
-    User
-} from 'firebase/auth';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { createContext, ReactNode, useContext, useEffect, useState } from 'react';
 
-// Define the shape of your context data
+// Define the shape of the authentication context
 interface AuthContextType {
-    user: User | null;
-    authReady: boolean;
-    firebaseApp: FirebaseApp | null;
+  user: any; // Replace 'any' with your user type
+  signIn: (data: any) => Promise<void>;
+  signUp: (data: any) => Promise<void>;
+  signOut: () => void;
+  loading: boolean;
 }
 
-const AuthContext = createContext<AuthContextType | null>(null);
+// Create the context with a default undefined value
+const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-export const useAuth = () => {
-    const context = useContext(AuthContext);
-    if (!context) {
-        throw new Error("useAuth must be used within an AuthProvider");
-    }
-    return context;
+// AuthProvider component that will wrap the application
+export const AuthProvider = ({ children }: { children: ReactNode }) => {
+  const [user, setUser] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+
+  // On component mount, check for a stored user session
+  useEffect(() => {
+    const loadUser = async () => {
+      try {
+        const storedUser = await AsyncStorage.getItem('user');
+        if (storedUser) {
+          setUser(JSON.parse(storedUser));
+        }
+      } catch (e) {
+        console.error("Failed to load user from storage", e);
+      } finally {
+        setLoading(false);
+      }
+    };
+    loadUser();
+  }, []);
+
+  // Sign in function
+  const signIn = async (data: any) => {
+    // --- TODO: Replace with your actual API call for signing in ---
+    console.log("Signing in with", data);
+    const fakeUser = { id: '1', email: data.email }; 
+    setUser(fakeUser);
+    await AsyncStorage.setItem('user', JSON.stringify(fakeUser));
+  };
+
+  // Sign up function
+  const signUp = async (data: any) => {
+    // --- TODO: Replace with your actual API call for signing up ---
+    console.log("Signing up with", data);
+    const fakeUser = { id: '1', email: data.email };
+    setUser(fakeUser);
+    await AsyncStorage.setItem('user', JSON.stringify(fakeUser));
+  };
+
+  // Sign out function
+  const signOut = async () => {
+    setUser(null);
+    await AsyncStorage.removeItem('user');
+  };
+
+  return (
+    <AuthContext.Provider value={{ user, signIn, signUp, signOut, loading }}>
+      {children}
+    </AuthContext.Provider>
+  );
 };
 
-// Define props for the provider
-interface AuthProviderProps {
-    children: ReactNode;
-}
-
-export const AuthProvider = ({ children }: AuthProviderProps) => {
-    const [user, setUser] = useState<User | null>(null);
-    const [authReady, setAuthReady] = useState(false);
-    const [firebaseApp, setFirebaseApp] = useState<FirebaseApp | null>(null);
-
-    useEffect(() => {
-        // Your Firebase config
-        const firebaseConfig = {
-            apiKey: process.env.EXPO_PUBLIC_FIREBASE_API_KEY, // Use Expo environment variables
-            authDomain: "daily-steps-tracker.firebaseapp.com",
-            projectId: "daily-steps-tracker",
-            storageBucket: "daily-steps-tracker.appspot.com",
-            messagingSenderId: "838553350749",
-            appId: "1:838553350749:web:ce4f60e1beef348d20d3b4"
-        };
-
-        try {
-            const app = initializeApp(firebaseConfig);
-            setFirebaseApp(app);
-            const auth = getAuth(app);
-
-            const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-                setUser(currentUser);
-                setAuthReady(true);
-            });
-
-            return () => unsubscribe();
-        } catch (e) {
-            console.warn("Firebase initialization failed:", e);
-        }
-    }, []);
-
-    const value = {
-        user,
-        authReady,
-        firebaseApp,
-    };
-
-    return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+// Custom hook to use the auth context
+export const useAuth = () => {
+  const context = useContext(AuthContext);
+  if (context === undefined) {
+    throw new Error('useAuth must be used within an AuthProvider');
+  }
+  return context;
 };

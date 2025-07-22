@@ -1,219 +1,236 @@
 // app/(tabs)/index.tsx
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Location from 'expo-location';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  ActivityIndicator,
-  Platform,
-  TextInput as RNTextInput,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View,
-} from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, StyleSheet, Text, View } from 'react-native';
 import MapView, { Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
+import MapViewDirections from 'react-native-maps-directions';
 
-import { addDoc, collection, getFirestore, serverTimestamp } from 'firebase/firestore';
-import { useAuth } from '../../contexts/AuthContext';
+import CollapsibleControlCard from '../../components/CollapsibleControlCard';
+import { GOOGLE_MAPS_API_KEY } from '../../constants/ApiKeys';
+import { DarkMapStyle } from '../../constants/MapStyles';
 
-const HomePage = () => {
-    // Constants
-    const AVG_STEP_LENGTH_METERS = 0.76;
-    const TARGET_TOTAL_STEPS = 10000;
+const METERS_PER_STEP = 0.762;
+const TARGET_STEPS = 10000;
 
-    // Contexts
-    const { user, firebaseApp } = useAuth();
-    const db = useMemo(() => (firebaseApp ? getFirestore(firebaseApp) : null), [firebaseApp]);
+// Default location to use if the emulator's GPS fails.
+const DEFAULT_LOCATION = {
+    coords: { latitude: 40.785091, longitude: -73.968285, altitude: null, accuracy: null, altitudeAccuracy: null, heading: null, speed: null },
+    timestamp: Date.now(),
+};
 
-    // State
-    const [currentLocation, setCurrentLocation] = useState<{ latitude: number; longitude: number } | null>(null);
-    const [alreadyWalkedSteps, setAlreadyWalkedSteps] = useState(0);
-    const [generatedRoute, setGeneratedRoute] = useState<{ polyline: any[]; steps: number } | null>(null);
-    const [errorMessage, setErrorMessage] = useState('');
-    const [isLoading, setIsLoading] = useState(false);
-    const [isTracking, setIsTracking] = useState(false);
-    const [sessionSteps, setSessionSteps] = useState(0);
+const haversineDistance = (coords1, coords2) => {
+    const toRad = (x) => (x * Math.PI) / 180;
+    const R = 6371;
+    const dLat = toRad(coords2.latitude - coords1.latitude);
+    const dLon = toRad(coords2.longitude - coords1.longitude);
+    const lat1 = toRad(coords1.latitude);
+    const lat2 = toRad(coords2.latitude);
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.sin(dLon / 2) * Math.sin(dLon / 2) * Math.cos(lat1) * Math.cos(lat2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c * 1000;
+};
 
+// Generates a destination point for the route
+const generateDestination = (startCoord) => {
+    const targetDistance = (TARGET_STEPS * METERS_PER_STEP) / 2; // Go out ~5k steps
+    const earthRadius = 6371000;
+    const bearing = Math.random() * 360;
+    const lat1 = startCoord.latitude * Math.PI / 180;
+    const lon1 = startCoord.longitude * Math.PI / 180;
+    const brng = bearing * Math.PI / 180;
+    const lat2 = Math.asin(Math.sin(lat1) * Math.cos(targetDistance / earthRadius) + Math.cos(lat1) * Math.sin(targetDistance / earthRadius) * Math.cos(brng));
+    const lon2 = lon1 + Math.atan2(Math.sin(brng) * Math.sin(targetDistance / earthRadius) * Math.cos(lat1), Math.cos(targetDistance / earthRadius) - Math.sin(lat1) * Math.sin(lat2));
+    return { latitude: lat2 * 180 / Math.PI, longitude: lon2 * 180 / Math.PI };
+}
+
+const getDeviceLocationWithTimeout = (timeout = 5000): Promise<Location.LocationObject> => {
+    return new Promise((resolve) => {
+        const timer = setTimeout(() => {
+            console.warn("Location request timed out. Using default location.");
+            resolve(DEFAULT_LOCATION);
+        }, timeout);
+        Location.getCurrentPositionAsync({}).then(location => {
+            clearTimeout(timer);
+            resolve(location);
+        }).catch(() => {
+            clearTimeout(timer);
+            resolve(DEFAULT_LOCATION);
+        });
+    });
+};
+
+const MapScreen = () => {
+    const [location, setLocation] = useState<Location.LocationObject | null>(null);
+    const [errorMsg, setErrorMsg] = useState<string | null>(null);
+    const locationSubscription = useRef<Location.LocationSubscription | null>(null);
     const mapRef = useRef<MapView>(null);
 
-    const targetStepsForRoute = useMemo(() => {
-        const totalCurrent = (alreadyWalkedSteps || 0) + (sessionSteps || 0);
-        return Math.max(0, TARGET_TOTAL_STEPS - totalCurrent);
-    }, [alreadyWalkedSteps, sessionSteps]);
+    const [isRecording, setIsRecording] = useState(false);
+    const [generatedPath, setGeneratedPath] = useState<any[]>([]);
+    const [destination, setDestination] = useState(null);
+    const [userPath, setUserPath] = useState<any[]>([]);
+    const [distance, setDistance] = useState(0);
+    const [duration, setDuration] = useState(0);
+    const [stepsRemaining, setStepsRemaining] = useState(TARGET_STEPS);
+
+    // --- DEBUGGING STEP 1 ---
+    // Log the imported API key to ensure it's not undefined.
+    useEffect(() => {
+        console.log("Imported Google Maps API Key:", GOOGLE_MAPS_API_KEY ? "Loaded" : "NOT LOADED / UNDEFINED");
+    }, []);
 
     useEffect(() => {
         (async () => {
             let { status } = await Location.requestForegroundPermissionsAsync();
             if (status !== 'granted') {
-                setErrorMessage('Permission to access location was denied');
+                setErrorMsg('Permission to access location was denied');
                 return;
             }
-
-            setIsLoading(true);
-            try {
-                let location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
-                const userLatLng = {
-                    latitude: location.coords.latitude,
-                    longitude: location.coords.longitude,
-                };
-                setCurrentLocation(userLatLng);
-                mapRef.current?.animateToRegion({ ...userLatLng, latitudeDelta: 0.02, longitudeDelta: 0.02 }, 1000);
-            } catch (error) {
-                setErrorMessage('Could not retrieve location.');
-            } finally {
-                setIsLoading(false);
-            }
+            const currentLocation = await getDeviceLocationWithTimeout();
+            setLocation(currentLocation);
         })();
     }, []);
+    
+    useEffect(() => {
+        if (location && mapRef.current) {
+            mapRef.current.animateToRegion({
+                latitude: location.coords.latitude,
+                longitude: location.coords.longitude,
+                latitudeDelta: 0.0922,
+                longitudeDelta: 0.0421,
+            });
+        }
+    }, [location]);
+
+    useEffect(() => { return () => { locationSubscription.current?.remove(); }; }, []);
+
+    useEffect(() => {
+        let timer: NodeJS.Timeout;
+        if (isRecording) {
+            timer = setInterval(() => setDuration(prev => prev + 1), 1000);
+        }
+        return () => clearInterval(timer);
+    }, [isRecording]);
+    
+    const saveActivity = async () => {
+        const activity = {
+            id: Date.now().toString(),
+            date: new Date().toISOString(),
+            distance,
+            duration,
+            steps: Math.floor(distance / METERS_PER_STEP),
+            path: userPath,
+        };
+        try {
+            const existingActivities = await AsyncStorage.getItem('activities');
+            const activities = existingActivities ? JSON.parse(existingActivities) : [];
+            activities.push(activity);
+            await AsyncStorage.setItem('activities', JSON.stringify(activities));
+            Alert.alert("Activity Saved!", "Your activity has been saved to your history.");
+        } catch (e) {
+            console.error("Failed to save activity.", e);
+            Alert.alert("Error", "Could not save your activity.");
+        }
+    };
+    
+    const startWatching = async () => {
+        locationSubscription.current = await Location.watchPositionAsync(
+            { accuracy: Location.Accuracy.BestForNavigation, timeInterval: 1000, distanceInterval: 10 },
+            (newLocation) => {
+                const newCoord = { latitude: newLocation.coords.latitude, longitude: newLocation.coords.longitude };
+                setUserPath((currentPath) => {
+                    const updatedPath = [...currentPath, newCoord];
+                    if(updatedPath.length > 1) {
+                        const lastCoord = updatedPath[updatedPath.length - 2];
+                        const newDistance = haversineDistance(lastCoord, newCoord);
+                        const newSteps = Math.floor(newDistance / METERS_PER_STEP);
+                        setDistance((d) => d + newDistance);
+                        setStepsRemaining(s => Math.max(0, s - newSteps));
+                    }
+                    return updatedPath;
+                });
+            }
+        );
+    };
+
+    const handleStartStopRecording = () => {
+        if (isRecording) {
+            locationSubscription.current?.remove();
+            if (distance > 50) {
+                saveActivity();
+            }
+        } else {
+            setUserPath(location ? [{ latitude: location.coords.latitude, longitude: location.coords.longitude }] : []);
+            setDistance(0);
+            setDuration(0);
+            if (generatedPath.length > 0) {
+                setStepsRemaining(TARGET_STEPS);
+            }
+            startWatching();
+        }
+        setIsRecording(!isRecording);
+    };
 
     const handleGenerateRoute = () => {
-        setErrorMessage("Automatic route generation is a complex feature to translate. This would require a dedicated Directions API service setup.");
+        if (!location) return;
+        const startCoord = { latitude: location.coords.latitude, longitude: location.coords.longitude };
+        const dest = generateDestination(startCoord);
+        setDestination(dest);
+        setStepsRemaining(TARGET_STEPS);
+        setUserPath([]);
     };
 
-    const handleSaveRoute = async () => {
-        if (!user || !db || sessionSteps === 0) {
-            setErrorMessage("No steps were recorded in this session to save.");
-            return;
-        }
-
-        setIsLoading(true);
-        try {
-            const appId = 'default-app-id';
-            const historyCollection = collection(db, `artifacts/${appId}/users/${user.uid}/walk_history`);
-            const walkDataToSave = {
-                steps: sessionSteps,
-                distanceMeters: sessionSteps * AVG_STEP_LENGTH_METERS,
-                date: serverTimestamp(),
-                startLocation: currentLocation,
-                // In a real app with route generation, you would save the polyline here
-            };
-            await addDoc(historyCollection, walkDataToSave);
-            setErrorMessage("Your walk has been saved!");
-            setAlreadyWalkedSteps(prev => prev + sessionSteps);
-            setSessionSteps(0);
-        } catch (error) {
-            setErrorMessage("Failed to save your walk.");
-        } finally {
-            setIsLoading(false);
-        }
-    };
+    if (!location) {
+        return <View style={styles.container}><ActivityIndicator size="large" color="#ffffff" /></View>;
+    }
 
     return (
         <View style={styles.container}>
-            {Platform.OS === 'web' ? (
-                <View style={[styles.map, styles.mapPlaceholder]}>
-                    <Text style={styles.mapPlaceholderText}>Map is available on mobile only.</Text>
+            <MapView ref={mapRef} style={StyleSheet.absoluteFillObject} provider={PROVIDER_GOOGLE} initialRegion={{latitude: location.coords.latitude, longitude: location.coords.longitude, latitudeDelta: 0.0922, longitudeDelta: 0.0421 }} customMapStyle={DarkMapStyle} showsUserLocation={true}>
+                {destination && (
+                    <MapViewDirections
+                        origin={{ latitude: location.coords.latitude, longitude: location.coords.longitude }}
+                        destination={destination}
+                        apikey={GOOGLE_MAPS_API_KEY}
+                        strokeWidth={5}
+                        strokeColor="#007AFF"
+                        mode="WALKING"
+                        avoidHighways
+                        avoidTolls
+                        avoidFerries
+                        onReady={result => {
+                            setGeneratedPath(result.coordinates);
+                            mapRef.current?.fitToCoordinates(result.coordinates, {
+                                edgePadding: { top: 50, right: 50, bottom: 250, left: 50 },
+                            });
+                        }}
+                        // --- DEBUGGING STEP 2 ---
+                        // This will catch and log the specific error from Google.
+                        onError={(errorMessage) => {
+                            console.error("MapViewDirections Error:", errorMessage);
+                            Alert.alert("Route Error", "Could not generate route. Please check your API key and Google Cloud settings.");
+                        }}
+                    />
+                )}
+                {userPath.length > 0 && <Polyline coordinates={userPath} strokeColor="#FF3B30" strokeWidth={4} />}
+            </MapView>
+            
+            {generatedPath.length > 0 && (
+                <View style={styles.stepsContainer}>
+                    <Text style={styles.stepsText}>{stepsRemaining.toLocaleString()} Steps Remaining</Text>
                 </View>
-            ) : (
-                <MapView
-                    ref={mapRef}
-                    style={styles.map}
-                    provider={PROVIDER_GOOGLE}
-                    initialRegion={{
-                        latitude: 37.78825,
-                        longitude: -122.4324,
-                        latitudeDelta: 0.0922,
-                        longitudeDelta: 0.0421,
-                    }}
-                    showsUserLocation
-                    customMapStyle={darkMapStyle}
-                >
-                    {generatedRoute && <Polyline coordinates={generatedRoute.polyline} strokeColor="#2DD4BF" strokeWidth={6} />}
-                </MapView>
             )}
 
-            {isLoading && !currentLocation && (
-                <View style={styles.loadingOverlay}>
-                    <ActivityIndicator size="large" color="#FFFFFF" />
-                    <Text style={styles.loadingText}>Getting your location...</Text>
-                </View>
-            )}
-
-            <View style={styles.controlsContainer}>
-                <Text style={styles.goalTitle}>Steps Goal</Text>
-                <View style={styles.progressBarBackground}>
-                    <View style={[styles.progressBarFill, { width: `${Math.min(((alreadyWalkedSteps + sessionSteps) / TARGET_TOTAL_STEPS) * 100, 100)}%` }]} />
-                </View>
-
-                <View style={styles.statsRow}>
-                    <View>
-                        <Text style={styles.label}>Today's Steps:</Text>
-                        <RNTextInput
-                            style={styles.input}
-                            value={String(alreadyWalkedSteps + sessionSteps)}
-                            onChangeText={text => setAlreadyWalkedSteps(Number(text) || 0)}
-                            keyboardType="number-pad"
-                            editable={!isTracking}
-                        />
-                    </View>
-                    <View style={{ alignItems: 'flex-end' }}>
-                        <Text style={styles.label}>Remaining:</Text>
-                        <Text style={styles.remainingSteps}>{targetStepsForRoute}</Text>
-                    </View>
-                </View>
-
-                {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
-
-                <TouchableOpacity
-                    onPress={handleGenerateRoute}
-                    disabled={isLoading || !currentLocation || targetStepsForRoute <= 0}
-                    style={[styles.button, (isLoading || !currentLocation || targetStepsForRoute <= 0) && styles.buttonDisabled]}
-                >
-                    <Text style={styles.buttonText}>Generate Route</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                    onPress={handleSaveRoute}
-                    disabled={isLoading || isTracking || sessionSteps === 0}
-                    style={[styles.button, styles.saveButton, (isLoading || isTracking || sessionSteps === 0) && styles.buttonDisabled]}
-                >
-                    <Text style={styles.buttonText}>Save Walk</Text>
-                </TouchableOpacity>
-            </View>
+            <CollapsibleControlCard isRecording={isRecording} onStartStop={handleStartStopRecording} onGenerateRoute={handleGenerateRoute} distance={distance} duration={duration}/>
         </View>
     );
 };
 
-const darkMapStyle = [{ "elementType": "geometry", "stylers": [{ "color": "#242f3e" }] }, { "elementType": "labels.text.fill", "stylers": [{ "color": "#746855" }] }, { "elementType": "labels.text.stroke", "stylers": [{ "color": "#242f3e" }] }, { "featureType": "administrative.locality", "elementType": "labels.text.fill", "stylers": [{ "color": "#d59563" }] }, { "featureType": "poi", "elementType": "labels.text.fill", "stylers": [{ "color": "#d59563" }] }, { "featureType": "poi.park", "elementType": "geometry", "stylers": [{ "color": "#263c3f" }] }, { "featureType": "poi.park", "elementType": "labels.text.fill", "stylers": [{ "color": "#6b9a76" }] }, { "featureType": "road", "elementType": "geometry", "stylers": [{ "color": "#38414e" }] }, { "featureType": "road", "elementType": "geometry.stroke", "stylers": [{ "color": "#212a37" }] }, { "featureType": "road", "elementType": "labels.text.fill", "stylers": [{ "color": "#9ca5b3" }] }, { "featureType": "road.highway", "elementType": "geometry", "stylers": [{ "color": "#746855" }] }, { "featureType": "road.highway", "elementType": "geometry.stroke", "stylers": [{ "color": "#1f2835" }] }, { "featureType": "road.highway", "elementType": "labels.text.fill", "stylers": [{ "color": "#f3d19c" }] }, { "featureType": "transit", "elementType": "geometry", "stylers": [{ "color": "#2f3948" }] }, { "featureType": "transit.station", "elementType": "labels.text.fill", "stylers": [{ "color": "#d59563" }] }, { "featureType": "water", "elementType": "geometry", "stylers": [{ "color": "#17263c" }] }, { "featureType": "water", "elementType": "labels.text.fill", "stylers": [{ "color": "#515c6d" }] }, { "featureType": "water", "elementType": "labels.text.stroke", "stylers": [{ "color": "#17263c" }] }];
-
 const styles = StyleSheet.create({
-    container: { flex: 1, backgroundColor: '#030712' },
-    map: { flex: 1 },
-    mapPlaceholder: {
-        justifyContent: 'center',
-        alignItems: 'center',
-        backgroundColor: '#242f3e',
-    },
-    mapPlaceholderText: {
-        color: '#9CA3AF',
-        fontSize: 16,
-    },
-    loadingOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', alignItems: 'center' },
-    loadingText: { color: '#FFFFFF', marginTop: 10 },
-    controlsContainer: {
-        position: 'absolute',
-        bottom: 0,
-        left: 0,
-        right: 0,
-        backgroundColor: '#111827',
-        borderTopLeftRadius: 20,
-        borderTopRightRadius: 20,
-        padding: 20,
-        paddingBottom: 40,
-        borderTopWidth: 1,
-        borderColor: '#374151',
-    },
-    goalTitle: { fontSize: 24, fontWeight: 'bold', color: '#2DD4BF', textAlign: 'center', marginBottom: 12 },
-    progressBarBackground: { height: 16, backgroundColor: '#374151', borderRadius: 8, width: '100%', marginBottom: 16, overflow: 'hidden' },
-    progressBarFill: { height: '100%', backgroundColor: '#2DD4BF', borderRadius: 8 },
-    statsRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 16 },
-    label: { color: '#D1D5DB', fontSize: 16, marginBottom: 4 },
-    input: { color: '#2DD4BF', fontSize: 24, fontWeight: 'bold', padding: 8, backgroundColor: '#374151', borderRadius: 8, minWidth: 120, textAlign: 'center' },
-    remainingSteps: { color: '#2DD4BF', fontSize: 32, fontWeight: 'bold' },
-    errorText: { color: '#F87171', textAlign: 'center', marginBottom: 12 },
-    button: { paddingVertical: 16, borderRadius: 12, alignItems: 'center', backgroundColor: '#2DD4BF', marginBottom: 10 },
-    buttonDisabled: { backgroundColor: '#4B5563' },
-    buttonText: { color: '#FFFFFF', fontSize: 18, fontWeight: 'bold' },
-    saveButton: { backgroundColor: '#06B6D4' }
+    container: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#1c1c1e' },
+    stepsContainer: { position: 'absolute', top: 20, backgroundColor: 'rgba(0,0,0,0.7)', paddingHorizontal: 15, paddingVertical: 8, borderRadius: 20, },
+    stepsText: { color: '#34C759', fontSize: 16, fontWeight: 'bold' }
 });
 
-export default HomePage;
+export default MapScreen;
